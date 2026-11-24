@@ -25,12 +25,22 @@ def snapshot(steps, samples, invalid=()):
         results = {}
         for step, status in zip(steps, statuses):
             totals[status] += 1
+            done, failed, *outputs = (
+                template.format(sample_id=sample_id, step=step["name"])
+                for template in (step["done_marker"], step["failed_marker"], *step["outputs"])
+            )
+            present = {
+                "complete": [done, *outputs],
+                "failed": [failed],
+                "incomplete": [done],
+                "pending": [],
+            }[status]
             results[step["name"]] = {
                 "status": status,
                 "evidence": {
                     "directory": f"no-longer-on-disk/{sample_id}",
-                    "present": [],
-                    "absent": step["outputs"],
+                    "present": present,
+                    "absent": [name for name in (done, failed, *outputs) if name not in present],
                 },
             }
         rows.append((sample_id, [], results))
@@ -148,6 +158,36 @@ class ComparisonTests(unittest.TestCase):
                 self.assertEqual(main([*self.args, "--json-report", str(self.report)]), 2)
                 self.assertIn(message, error.getvalue())
                 self.assertEqual(self.report.read_text(encoding="utf-8"), "original")
+
+    def test_rejects_complete_status_when_required_bam_is_absent(self):
+        align = {
+            **definition("align", "{sample_id}.{step}.bam"),
+            "done_marker": "{sample_id}.done",
+            "failed_marker": "{step}.failed",
+        }
+        valid = snapshot([align], {"sample": ("complete",)})
+        invalid = copy.deepcopy(valid)
+        evidence = invalid["rows"][0]["steps"]["align"]["evidence"]
+        evidence["present"].remove("sample.align.bam")
+        evidence["absent"].append("sample.align.bam")
+        self.write_snapshots(valid, invalid)
+        with redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(main([*self.args, "--json-report", str(self.report)]), 2)
+        message = error.getvalue()
+        self.assertIn(f"invalid snapshot {self.after}", message)
+        self.assertIn("sample 'sample', step 'align'", message)
+        self.assertIn("saved status 'complete' contradicts file evidence (expected 'incomplete')", message)
+        self.assertFalse(self.report.exists())
+
+    def test_rejects_omitted_duplicate_and_unexpected_evidence_filenames(self):
+        valid = snapshot([definition("align")], {"sample": ("complete",)})
+        for absent in ([], ["failed.txt", "out.bam"], ["unrelated.txt"]):
+            with self.subTest(absent=absent), redirect_stderr(io.StringIO()) as error:
+                invalid = copy.deepcopy(valid)
+                invalid["rows"][0]["steps"]["align"]["evidence"]["absent"] = absent
+                self.write_snapshots(invalid, valid)
+                self.assertEqual(main(self.args), 2)
+                self.assertIn("file evidence must list each expected filename exactly once", error.getvalue())
 
     def test_reports_cannot_overwrite_snapshots_or_each_other(self):
         data = snapshot([definition("align")], {"sample": ("complete",)})

@@ -10,13 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 
 from .comparison import compare
+from .pipeline import expand_template, step_status, validate_placeholders
 from .reports import format_evidence, validate_destinations, write_json
 from .snapshots import SCHEMA_VERSION, STATUSES, reject_json_constant
 
 DONE_MARKER = "done.marker"
 FAILURE_RECORD = "failed.txt"
 REQUIRED_COLUMNS = ("sample_id", "read1", "read2")
-PLACEHOLDER = re.compile(r"\{(sample_id|step)\}")
 
 
 @dataclass(frozen=True)
@@ -55,9 +55,7 @@ def validate_directory(value, field):
 def validate_template(value, field, validate=validate_component):
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
-    remainder = PLACEHOLDER.sub("", value)
-    if "{" in remainder or "}" in remainder:
-        raise ValueError(f"{field} has an unknown or malformed placeholder")
+    validate_placeholders(value, field)
     validate(value, field)
     return value
 
@@ -164,21 +162,18 @@ def read_samples(sheet):
 
 
 def locate_step(output_dir, root, sample_id, name, step):
-    values = {"sample_id": sample_id, "step": name}
     label = f"sample {sample_id!r}, step {name!r}"
-
-    def expand(template):
-        return PLACEHOLDER.sub(lambda match: values[match[1]], template)
 
     if step.directory is None:
         directory = output_dir / sample_id / name
     else:
-        relative = expand(step.directory)
+        relative = expand_template(step.directory, sample_id, name)
         validate_directory(relative, f"{label} directory")
         directory = output_dir / relative
 
     done, failed, *outputs = (
-        expand(template) for template in (step.done_marker, step.failed_marker, *step.outputs)
+        expand_template(template, sample_id, name)
+        for template in (step.done_marker, step.failed_marker, *step.outputs)
     )
     for filename in (done, failed, *outputs):
         validate_component(filename, f"{label} filename {filename!r}")
@@ -198,20 +193,8 @@ def inspect_step(directory, outputs, done_marker=DONE_MARKER, failed_marker=FAIL
     names = (done_marker, failed_marker, *outputs)
     present = [name for name in names if (directory / name).is_file()]
     missing = [name for name in names if name not in present]
-    done = done_marker in present
-    failed = failed_marker in present
-    if done and failed:
-        status = "incomplete"
-    elif failed:
-        status = "failed"
-    elif done and all(name in present for name in outputs):
-        status = "complete"
-    elif present:
-        status = "incomplete"
-    else:
-        status = "pending"
     return {
-        "status": status,
+        "status": step_status(present, outputs, done_marker, failed_marker),
         "evidence": {"directory": str(directory), "present": present, "absent": missing},
     }
 

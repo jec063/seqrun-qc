@@ -139,7 +139,7 @@ The root is an object with these fields:
 | `status_totals` | Object with integer counts for `complete`, `failed`, `incomplete`, and `pending`. |
 | `rows` | Array in sample-sheet order. Each row has its original starting line number (`row`), the three sample-sheet fields, an `issues` array, and a `steps` object keyed by step name. |
 
-A valid row has one result for each configured step. A result has a `status` string and an `evidence` object with a `directory` string and `present` and `absent` filename arrays. Invalid rows, including duplicate IDs, are kept with their validation messages and an empty `steps` object.
+A valid row has one result for each configured step. A result has a `status` string and an `evidence` object with a `directory` string and `present` and `absent` filename arrays. Each expanded output and marker filename must appear exactly once across those arrays, and the saved status must agree with the evidence. Comparison checks these rules offline. Invalid rows, including duplicate IDs, are kept with their validation messages and an empty `steps` object.
 
 ### Comparison and exit codes
 

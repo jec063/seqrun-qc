@@ -1,6 +1,9 @@
 """Read and validate the versioned snapshot format without consulting pipeline files."""
 
 import json
+from collections import Counter
+
+from .pipeline import expand_template, step_status, validate_placeholders
 
 SCHEMA_VERSION = 1
 STATUSES = ("complete", "failed", "incomplete", "pending")
@@ -13,6 +16,34 @@ def strings(value):
 
 def reject_json_constant(value):
     raise ValueError(f"invalid JSON constant {value}")
+
+
+def validate_step_result(sample_id, definition, result, label):
+    if not isinstance(result, dict) or result.get("status") not in STATUSES:
+        raise ValueError(f"{label} has an invalid status")
+    evidence = result.get("evidence")
+    if (
+        not isinstance(evidence, dict)
+        or not isinstance(evidence.get("directory"), str)
+        or not strings(evidence.get("present"))
+        or not strings(evidence.get("absent"))
+    ):
+        raise ValueError(f"{label} has invalid file evidence")
+
+    done, failed, *outputs = (
+        expand_template(template, sample_id, definition["name"])
+        for template in (definition["done_marker"], definition["failed_marker"], *definition["outputs"])
+    )
+    expected = (done, failed, *outputs)
+    if len({name.casefold() for name in expected}) != len(expected):
+        raise ValueError(f"{label} has colliding expanded filenames")
+    present = evidence["present"]
+    if Counter(present + evidence["absent"]) != dict.fromkeys(expected, 1):
+        raise ValueError(f"{label} file evidence must list each expected filename exactly once")
+    status = step_status(present, outputs, done, failed)
+    if result["status"] != status:
+        raise ValueError(f"{label} saved status {result['status']!r} contradicts file evidence "
+                         f"(expected {status!r})")
 
 
 def validate_snapshot(snapshot):
@@ -35,11 +66,13 @@ def validate_snapshot(snapshot):
         outputs = step.get("outputs")
         if not strings(outputs) or not outputs or not all(outputs):
             raise ValueError(f"step {step['name']!r} requires a nonempty list of output filenames")
+        for template in (step["done_marker"], step["failed_marker"], *outputs):
+            validate_placeholders(template, f"step {step['name']!r} filename template {template!r}")
         name = step["name"].casefold()
         if name in names:
             raise ValueError(f"duplicate step name {step['name']!r}")
         names.add(name)
-    step_names = {step["name"] for step in steps}
+    definitions = {step["name"]: step for step in steps}
 
     rows = snapshot.get("rows")
     if not isinstance(rows, list):
@@ -70,20 +103,11 @@ def validate_snapshot(snapshot):
         if not sample_id or sample_id in valid_ids:
             raise ValueError(f"row {line} has a blank or duplicate valid sample ID")
         valid_ids.add(sample_id)
-        if results.keys() != step_names:
+        if results.keys() != definitions.keys():
             raise ValueError(f"row {line} must have a result for each declared step")
         for name, result in results.items():
-            label = f"row {line}, step {name!r}"
-            if not isinstance(result, dict) or result.get("status") not in STATUSES:
-                raise ValueError(f"{label} has an invalid status")
-            evidence = result.get("evidence")
-            if (
-                not isinstance(evidence, dict)
-                or not isinstance(evidence.get("directory"), str)
-                or not strings(evidence.get("present"))
-                or not strings(evidence.get("absent"))
-            ):
-                raise ValueError(f"{label} has invalid file evidence")
+            label = f"sample {sample_id!r}, step {name!r} (row {line})"
+            validate_step_result(sample_id, definitions[name], result, label)
             counts[result["status"]] += 1
     if valid_ids & invalid_ids:
         raise ValueError("a sample ID appears in both valid and invalid rows")
