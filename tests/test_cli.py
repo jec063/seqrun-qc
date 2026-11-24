@@ -136,11 +136,12 @@ class ConfigTests(unittest.TestCase):
                 json.dumps({"steps": [{"name": name, "outputs": ["out"]}]}),
                 "step 1 name must be a nonempty, safe single path component",
             ))
-        for filename in ("", ".", "..", "sub/file", r"sub\file", "/tmp/file", "C:file", "\x00", 42):
+        for filename in ("", ".", "..", "sub/file", r"sub\file", "/tmp/file", "C:file", "\x00"):
             cases.append((
                 json.dumps({"steps": [{"name": "qc", "outputs": [filename]}]}),
                 "step 1 output 1 must be a nonempty, safe single path component",
             ))
+        cases.append(('{"steps": [{"name": "qc", "outputs": [42]}]}', "output 1 must be a string"))
         for filename in ("done.marker", "failed.txt", "DONE.MARKER"):
             cases.append((
                 json.dumps({"steps": [{"name": "qc", "outputs": [filename]}]}),
@@ -162,6 +163,65 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(main(self.args), 2)
         self.assertIn(f"invalid config {self.config}", errors.getvalue())
         self.assertFalse(self.report.exists())
+
+    def test_flat_and_nested_layouts_use_expanded_markers(self):
+        output = self.root / "sample.align.bam"
+        output.touch()
+        (self.root / "sample.done").touch()
+        nested = self.root / "work" / "sample" / "qc"
+        nested.mkdir(parents=True)
+        (nested / "qc.failed").touch()
+        self.config.write_text(json.dumps({"steps": [
+            {"name": "align", "directory": ".", "outputs": ["{sample_id}.{step}.bam"],
+             "done_marker": "{sample_id}.done", "failed_marker": "{sample_id}.failed"},
+            {"name": "qc", "directory": "work/{sample_id}/{step}", "outputs": ["metrics.tsv"],
+             "failed_marker": "{step}.failed"},
+        ]}), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(self.args), 1)
+        with self.report.open(newline="", encoding="utf-8") as handle:
+            row, = csv.DictReader(handle)
+        self.assertEqual(row["align_status"], "complete")
+        self.assertIn("present [sample.done, sample.align.bam]", row["align_evidence"])
+        self.assertEqual(row["qc_status"], "failed")
+        self.assertIn(f"{nested}: present [qc.failed]", row["qc_evidence"])
+
+    def test_invalid_layouts_leave_report_untouched(self):
+        cases = [
+            ({"directory": "{other}/qc"}, "unknown or malformed placeholder"),
+            ({"outputs": ["{sample_id!r}.txt"]}, "unknown or malformed placeholder"),
+            ({"failed_marker": "{step"}, "unknown or malformed placeholder"),
+            ({"directory": "/tmp"}, "relative to OUTPUT_DIR"),
+            ({"directory": "{step}/../../extra"}, "relative to OUTPUT_DIR"),
+            ({"directory": r"C:\outside"}, "safe single path component"),
+            ({"done_marker": "{sample_id}/done"}, "safe single path component"),
+            ({"done_marker": "{sample_id}", "failed_marker": "SAMPLE"}, "colliding"),
+            ({"outputs": ["{step}.txt", "QC.txt"]}, "duplicate output filename"),
+            ({"outputs": ["{sample_id}.txt"], "failed_marker": "sample.txt"}, "reserved marker"),
+            ({"outputs": ["{step}1.txt"], "name": "com"}, "safe single path component"),
+        ]
+        self.report.write_bytes(b"original")
+        for overrides, message in cases:
+            config = {"steps": [{"name": "qc", "outputs": ["file"], **overrides}]}
+            with self.subTest(config=config), redirect_stderr(io.StringIO()) as errors:
+                self.config.write_text(json.dumps(config), encoding="utf-8")
+                self.assertEqual(main(self.args), 2)
+                self.assertIn(message, errors.getvalue())
+                self.assertEqual(self.report.read_bytes(), b"original")
+
+    def test_symlinks_cannot_escape_output_directory(self):
+        output = self.root / "output"
+        output.mkdir()
+        self.args[2] = str(output)
+        (output / "linked").symlink_to(self.root, target_is_directory=True)
+        (output / "artifact").symlink_to(self.root / "R1.fq")
+        for directory in ("linked", "."):
+            config = {"steps": [{"name": "qc", "directory": directory, "outputs": ["artifact"]}]}
+            with self.subTest(directory=directory), redirect_stderr(io.StringIO()) as errors:
+                self.config.write_text(json.dumps(config), encoding="utf-8")
+                self.assertEqual(main(self.args), 2)
+                self.assertIn("path escapes OUTPUT_DIR", errors.getvalue())
+                self.assertFalse(self.report.exists())
 
 
 class StepTests(unittest.TestCase):

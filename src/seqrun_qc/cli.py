@@ -6,16 +6,28 @@ import json
 import re
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
-DEFAULT_STEPS = {
-    "trim": ("read1.trimmed.fastq", "read2.trimmed.fastq"),
-    "qc": ("metrics.tsv",),
-}
 DONE_MARKER = "done.marker"
 FAILURE_RECORD = "failed.txt"
 STATUSES = ("complete", "failed", "incomplete", "pending")
 REQUIRED_COLUMNS = ("sample_id", "read1", "read2")
+PLACEHOLDER = re.compile(r"\{(sample_id|step)\}")
+
+
+@dataclass(frozen=True)
+class Step:
+    outputs: tuple[str, ...]
+    directory: str | None = None
+    done_marker: str = DONE_MARKER
+    failed_marker: str = FAILURE_RECORD
+
+
+DEFAULT_STEPS = {
+    "trim": Step(("read1.trimmed.fastq", "read2.trimmed.fastq")),
+    "qc": Step(("metrics.tsv",)),
+}
 
 
 def validate_component(value, field):
@@ -27,6 +39,38 @@ def validate_component(value, field):
         or PureWindowsPath(value).is_reserved()
     ):
         raise ValueError(f"{field} must be a nonempty, safe single path component")
+
+
+def validate_directory(value, field):
+    if value.startswith("/") or ".." in value.split("/"):
+        raise ValueError(f"{field} must be relative to OUTPUT_DIR without parent traversal")
+    for component in value.split("/"):
+        if component != ".":
+            validate_component(component, field)
+
+
+def validate_template(value, field, validate=validate_component):
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    remainder = PLACEHOLDER.sub("", value)
+    if "{" in remainder or "}" in remainder:
+        raise ValueError(f"{field} has an unknown or malformed placeholder")
+    validate(value, field)
+    return value
+
+
+def validate_filenames(done, failed, outputs, label):
+    markers = {done.casefold(), failed.casefold()}
+    if len(markers) != 2:
+        raise ValueError(f"{label} has colliding done and failed marker filenames")
+    seen = set()
+    for index, output in enumerate(outputs, start=1):
+        key = output.casefold()
+        if key in markers:
+            raise ValueError(f"{label} output {index} collides with a reserved marker: {output!r}")
+        if key in seen:
+            raise ValueError(f"{label} has duplicate output filename {output!r}")
+        seen.add(key)
 
 
 def reject_json_constant(value):
@@ -58,12 +102,21 @@ def load_steps(config):
             outputs = entry.get("outputs")
             if not isinstance(outputs, list) or not outputs:
                 raise ValueError(f"{label} outputs must be a nonempty list")
-            for output_index, filename in enumerate(outputs, start=1):
-                field = f"{label} output {output_index}"
-                validate_component(filename, field)
-                if filename.casefold() in (DONE_MARKER, FAILURE_RECORD):
-                    raise ValueError(f"{field} collides with a reserved marker: {filename!r}")
-            steps[name] = outputs
+            directory = None
+            if "directory" in entry:
+                directory = validate_template(
+                    entry["directory"], f"{label} directory", validate_directory
+                )
+            done = validate_template(entry.get("done_marker", DONE_MARKER), f"{label} done_marker")
+            failed = validate_template(
+                entry.get("failed_marker", FAILURE_RECORD), f"{label} failed_marker"
+            )
+            filenames = tuple(
+                validate_template(filename, f"{label} output {index}")
+                for index, filename in enumerate(outputs, start=1)
+            )
+            validate_filenames(done, failed, filenames, label)
+            steps[name] = Step(filenames, directory, done, failed)
         return steps
     except (OSError, ValueError, RecursionError) as exc:
         raise ValueError(f"invalid config {config}: {exc}") from exc
@@ -111,12 +164,43 @@ def read_samples(sheet):
     return samples
 
 
-def inspect_step(directory, outputs):
-    names = (DONE_MARKER, FAILURE_RECORD, *outputs)
+def locate_step(output_dir, root, sample_id, name, step):
+    values = {"sample_id": sample_id, "step": name}
+    label = f"sample {sample_id!r}, step {name!r}"
+
+    def expand(template):
+        return PLACEHOLDER.sub(lambda match: values[match[1]], template)
+
+    if step.directory is None:
+        directory = output_dir / sample_id / name
+    else:
+        relative = expand(step.directory)
+        validate_directory(relative, f"{label} directory")
+        directory = output_dir / relative
+
+    done, failed, *outputs = (
+        expand(template) for template in (step.done_marker, step.failed_marker, *step.outputs)
+    )
+    for filename in (done, failed, *outputs):
+        validate_component(filename, f"{label} filename {filename!r}")
+    validate_filenames(done, failed, outputs, label)
+
+    for path in (directory, *(directory / filename for filename in (done, failed, *outputs))):
+        try:
+            resolved = path.resolve()
+        except RuntimeError as exc:
+            raise ValueError(f"{label}: cannot resolve path {path}") from exc
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"{label}: path escapes OUTPUT_DIR: {path}")
+    return directory, outputs, done, failed
+
+
+def inspect_step(directory, outputs, done_marker=DONE_MARKER, failed_marker=FAILURE_RECORD):
+    names = (done_marker, failed_marker, *outputs)
     present = [name for name in names if (directory / name).is_file()]
     missing = [name for name in names if name not in present]
-    done = DONE_MARKER in present
-    failed = FAILURE_RECORD in present
+    done = done_marker in present
+    failed = failed_marker in present
     if done and failed:
         status = "incomplete"
     elif failed:
@@ -137,6 +221,7 @@ def inspect_step(directory, outputs):
 def check(sheet, output_dir, report, steps=DEFAULT_STEPS):
     if not output_dir.is_dir():
         raise ValueError(f"pipeline output directory does not exist: {output_dir}")
+    root = output_dir.resolve()
     samples = read_samples(sheet)
     fields = ["row", *REQUIRED_COLUMNS, "issues"]
     for step in steps:
@@ -150,8 +235,9 @@ def check(sheet, output_dir, report, steps=DEFAULT_STEPS):
         if sample["issues"]:
             invalid.append(row)
         else:
-            for step, outputs in steps.items():
-                status, evidence = inspect_step(output_dir / row["sample_id"] / step, outputs)
+            for step, layout in steps.items():
+                paths = locate_step(output_dir, root, row["sample_id"], step, layout)
+                status, evidence = inspect_step(*paths)
                 row[f"{step}_status"] = status
                 row[f"{step}_evidence"] = evidence
                 totals[status] += 1

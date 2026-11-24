@@ -53,7 +53,7 @@ Pass `--config PATH` to replace the default steps with an ordered list from a UT
 }
 ```
 
-The `steps` list and each step's `outputs` list must be nonempty. Step names must be unique regardless of case. Names and output filenames must each be a single safe path component. Avoid path separators, control characters, Windows-reserved characters and device names, and trailing dots or spaces. Output filenames cannot match `done.marker` or `failed.txt` regardless of case. Use the spelling and case of the files on disk.
+The `steps` list and each step's `outputs` list must be nonempty. Step names must be unique regardless of case. Step names and expanded output and marker filenames must each be a single safe path component. Avoid path separators, control characters, Windows-reserved characters and device names, and trailing dots or spaces. Output and marker filenames within a step must be distinct regardless of case. Use the spelling and case of the files on disk.
 
 The same directory layout, markers, and status rules apply. The CSV adds a status and evidence column for each configured step in the order listed. An invalid config exits with code `2` without changing the report.
 
@@ -64,6 +64,26 @@ After installing, run the custom demo from the repository root.
 ```
 
 The one sample has two complete steps and exits with code `0`. The report lists `align_status`, `align_evidence`, `qc_status`, and `qc_evidence` in that order after the sample columns. The tiny alignment files are empty placeholders because the CLI checks file presence.
+
+### Flat and nested layouts
+
+Each step can override where its files are stored and how its markers are named.
+
+| Optional field | Default | Example |
+| --- | --- | --- |
+| `directory` | `{sample_id}/{step}` | `.` for `OUTPUT_DIR`, or `results/{sample_id}/{step}` for nested output |
+| `done_marker` | `done.marker` | `{sample_id}.done` |
+| `failed_marker` | `failed.txt` | `{sample_id}.failed` |
+
+These fields and each entry in `outputs` accept `{sample_id}` and `{step}`, for example `{sample_id}.filtered.bam`. Use `/` between directory components. Directories must be relative to `OUTPUT_DIR` and cannot contain `..`. Any symlink used by an expanded path must resolve inside `OUTPUT_DIR`. Invalid templates, unsafe paths, and filenames that collide after expansion exit with code `2` and leave the report untouched.
+
+Run the flat demo from the repository root.
+
+```sh
+.venv/bin/seqrun-qc check demo/flat/samples.csv demo/flat/output --config demo/flat/steps.json --report /tmp/seqrun-qc-flat.csv
+```
+
+Both samples share one output directory. The `complete` sample has both empty BAM placeholders and its done marker. The `missing-index` sample has a BAM and done marker but no index, so its alignment step is incomplete. The command writes the report and exits with code `1`.
 
 ## Expected demo results
 
