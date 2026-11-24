@@ -1,0 +1,7 @@
+sample_id,read1,read2
+success,reads/R1.fastq,reads/R2.fastq
+duplicate,reads/R1.fastq,reads/R2.fastq
+duplicate,reads/R1.fastq,reads/absent.fastq
+failure,reads/R1.fastq,reads/R2.fastq
+interrupted,reads/R1.fastq,reads/R2.fastq
+pending,reads/R1.fastq,reads/R2.fastq
