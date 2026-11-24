@@ -62,3 +62,34 @@ jobs:
               if next(report, None) is None:
                   raise SystemExit("Custom demo report has no sample rows")
           PYTHON
+      - name: Smoke-test flat-layout demo
+        shell: bash
+        run: |
+          demo_dir=$(mktemp -d)
+          trap 'rm -rf "$demo_dir"' EXIT
+          report="$demo_dir/flat.csv"
+
+          flat_exit=0
+          seqrun-qc check demo/flat/samples.csv demo/flat/output \
+            --config demo/flat/steps.json --report "$report" || flat_exit=$?
+          if [ "$flat_exit" -ne 1 ]; then
+            echo "Flat demo exited $flat_exit, expected 1" >&2
+            exit 1
+          fi
+
+          python - "$report" <<'PYTHON'
+          import csv
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8", newline="") as report_file:
+              rows = list(csv.DictReader(report_file))
+          expected = [("complete", "complete"), ("missing-index", "incomplete")]
+          actual = [(row["sample_id"], row["align_status"]) for row in rows]
+          if actual != expected:
+              raise SystemExit(f"Expected flat demo statuses {expected}, got {actual}")
+
+          evidence = rows[1]["align_evidence"]
+          absent = evidence.partition("; absent [")[2].removesuffix("]").split(", ")
+          if "missing-index.filtered.bam.bai" not in absent:
+              raise SystemExit(f"Flat demo evidence must list the missing BAM index: {evidence}")
+          PYTHON

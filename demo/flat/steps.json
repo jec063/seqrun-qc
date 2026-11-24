@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "align",
+      "directory": ".",
+      "outputs": ["{sample_id}.filtered.bam", "{sample_id}.filtered.bam.bai"],
+      "done_marker": "{sample_id}.done",
+      "failed_marker": "{sample_id}.failed"
+    }
+  ]
+}
