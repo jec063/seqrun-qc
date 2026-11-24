@@ -7,6 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from seqrun_qc.cli import inspect_step, main, read_samples
+from seqrun_qc.reports import format_evidence
 
 
 class SampleSheetTests(unittest.TestCase):
@@ -240,8 +241,9 @@ class StepTests(unittest.TestCase):
                 directory = Path(folder)
                 for name in files:
                     (directory / name).touch()
-                status, evidence = inspect_step(directory, ("one", "two"))
-                self.assertEqual(status, expected)
+                result = inspect_step(directory, ("one", "two"))
+                evidence = format_evidence(result["evidence"])
+                self.assertEqual(result["status"], expected)
                 known = ("done.marker", "failed.txt", "one", "two")
                 present = ", ".join(name for name in known if name in files) or "none"
                 absent = ", ".join(name for name in known if name not in files) or "none"
