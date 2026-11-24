@@ -6,14 +6,17 @@ import json
 import re
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
+
+from .comparison import compare
+from .pipeline import expand_template, step_status, validate_placeholders
+from .reports import format_evidence, validate_destinations, write_json
+from .snapshots import SCHEMA_VERSION, STATUSES, reject_json_constant
 
 DONE_MARKER = "done.marker"
 FAILURE_RECORD = "failed.txt"
-STATUSES = ("complete", "failed", "incomplete", "pending")
 REQUIRED_COLUMNS = ("sample_id", "read1", "read2")
-PLACEHOLDER = re.compile(r"\{(sample_id|step)\}")
 
 
 @dataclass(frozen=True)
@@ -52,9 +55,7 @@ def validate_directory(value, field):
 def validate_template(value, field, validate=validate_component):
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
-    remainder = PLACEHOLDER.sub("", value)
-    if "{" in remainder or "}" in remainder:
-        raise ValueError(f"{field} has an unknown or malformed placeholder")
+    validate_placeholders(value, field)
     validate(value, field)
     return value
 
@@ -71,10 +72,6 @@ def validate_filenames(done, failed, outputs, label):
         if key in seen:
             raise ValueError(f"{label} has duplicate output filename {output!r}")
         seen.add(key)
-
-
-def reject_json_constant(value):
-    raise ValueError(f"invalid JSON constant {value}")
 
 
 def load_steps(config):
@@ -165,21 +162,18 @@ def read_samples(sheet):
 
 
 def locate_step(output_dir, root, sample_id, name, step):
-    values = {"sample_id": sample_id, "step": name}
     label = f"sample {sample_id!r}, step {name!r}"
-
-    def expand(template):
-        return PLACEHOLDER.sub(lambda match: values[match[1]], template)
 
     if step.directory is None:
         directory = output_dir / sample_id / name
     else:
-        relative = expand(step.directory)
+        relative = expand_template(step.directory, sample_id, name)
         validate_directory(relative, f"{label} directory")
         directory = output_dir / relative
 
     done, failed, *outputs = (
-        expand(template) for template in (step.done_marker, step.failed_marker, *step.outputs)
+        expand_template(template, sample_id, name)
+        for template in (step.done_marker, step.failed_marker, *step.outputs)
     )
     for filename in (done, failed, *outputs):
         validate_component(filename, f"{label} filename {filename!r}")
@@ -199,64 +193,88 @@ def inspect_step(directory, outputs, done_marker=DONE_MARKER, failed_marker=FAIL
     names = (done_marker, failed_marker, *outputs)
     present = [name for name in names if (directory / name).is_file()]
     missing = [name for name in names if name not in present]
-    done = done_marker in present
-    failed = failed_marker in present
-    if done and failed:
-        status = "incomplete"
-    elif failed:
-        status = "failed"
-    elif done and all(name in present for name in outputs):
-        status = "complete"
-    elif present:
-        status = "incomplete"
-    else:
-        status = "pending"
-    evidence = (
-        f"{directory}: present [{', '.join(present) or 'none'}]; "
-        f"absent [{', '.join(missing) or 'none'}]"
-    )
-    return status, evidence
+    return {
+        "status": step_status(present, outputs, done_marker, failed_marker),
+        "evidence": {"directory": str(directory), "present": present, "absent": missing},
+    }
 
 
-def check(sheet, output_dir, report, steps=DEFAULT_STEPS):
+def collect_snapshot(sheet, output_dir, steps):
     if not output_dir.is_dir():
         raise ValueError(f"pipeline output directory does not exist: {output_dir}")
     root = output_dir.resolve()
-    samples = read_samples(sheet)
-    fields = ["row", *REQUIRED_COLUMNS, "issues"]
-    for step in steps:
-        fields.extend((f"{step}_status", f"{step}_evidence"))
-    totals = Counter()
-    invalid = []
-    rows = []
-    for sample in samples:
-        row = {field: sample.get(field, "") for field in fields}
-        row["issues"] = "; ".join(sample["issues"])
-        if sample["issues"]:
-            invalid.append(row)
-        else:
-            for step, layout in steps.items():
-                paths = locate_step(output_dir, root, row["sample_id"], step, layout)
-                status, evidence = inspect_step(*paths)
-                row[f"{step}_status"] = status
-                row[f"{step}_evidence"] = evidence
-                totals[status] += 1
-        rows.append(row)
+    rows = read_samples(sheet)
+    totals = dict.fromkeys(STATUSES, 0)
+    inputs = {sheet, output_dir}
+    for row in rows:
+        for key in REQUIRED_COLUMNS:
+            row.setdefault(key, "")
+        for key in ("read1", "read2"):
+            if row[key] and "\x00" not in row[key]:
+                inputs.add(sheet.parent / row[key])
+        row["steps"] = {}
+        if row["issues"]:
+            continue
+        for name, step in steps.items():
+            directory, outputs, done, failed = locate_step(
+                output_dir, root, row["sample_id"], name, step
+            )
+            result = inspect_step(directory, outputs, done, failed)
+            row["steps"][name] = result
+            totals[result["status"]] += 1
+            inputs.update(directory / filename for filename in (done, failed, *outputs))
 
-    if report.resolve() == sheet.resolve() or (
-        report.exists() and report.samefile(sheet)
-    ):
-        raise ValueError("report path must differ from the sample sheet")
+    definitions = []
+    for name, step in steps.items():
+        definition = asdict(step)
+        if definition["directory"] is None:
+            definition["directory"] = "{sample_id}/{step}"
+        definitions.append({"name": name, **definition})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "steps": definitions,
+        "status_totals": totals,
+        "rows": rows,
+    }, inputs
+
+
+def write_csv(report, snapshot):
+    fields = ["row", *REQUIRED_COLUMNS, "issues"]
+    for step in snapshot["steps"]:
+        name = step["name"]
+        fields.extend((f"{name}_status", f"{name}_evidence"))
     with report.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in snapshot["rows"]:
+            record = {key: row[key] for key in ("row", *REQUIRED_COLUMNS)}
+            record["issues"] = "; ".join(row["issues"])
+            for name, result in row["steps"].items():
+                record[f"{name}_status"] = result["status"]
+                record[f"{name}_evidence"] = format_evidence(result["evidence"])
+            writer.writerow(record)
 
-    print(f"{len(samples)} rows checked, {len(invalid)} need correction.")
+
+def check(sheet, output_dir, report, steps=DEFAULT_STEPS, *, json_report=None, config=None):
+    snapshot, inputs = collect_snapshot(sheet, output_dir, steps)
+    if config is not None:
+        inputs.add(config)
+    destinations = [report] if json_report is None else [report, json_report]
+    validate_destinations(destinations, inputs)
+    write_csv(report, snapshot)
+    if json_report is not None:
+        write_json(json_report, snapshot)
+
+    rows = snapshot["rows"]
+    invalid = [row for row in rows if row["issues"]]
+    totals = snapshot["status_totals"]
+    print(f"{len(rows)} rows checked, {len(invalid)} need correction.")
     for row in invalid:
-        print(f"  Row {row['row']} ({row['sample_id'] or 'blank ID'}): {row['issues']}")
+        print(f"  Row {row['row']} ({row['sample_id'] or 'blank ID'}): {'; '.join(row['issues'])}")
     print("Steps: " + ", ".join(f"{totals[status]} {status}" for status in STATUSES) + ".")
     print(f"CSV report: {report}")
+    if json_report is not None:
+        print(f"JSON report: {json_report}")
     return int(bool(invalid) or any(totals[status] for status in STATUSES[1:]))
 
 
@@ -267,15 +285,30 @@ def main(argv=None):
     command.add_argument("sample_sheet", type=Path)
     command.add_argument("output_dir", type=Path, help="existing pipeline output directory")
     command.add_argument("--report", type=Path, default=Path("seqrun-qc-status.csv"))
+    command.add_argument("--json-report", type=Path, help="write a JSON run snapshot")
     command.add_argument("--config", type=Path, help="JSON file defining pipeline steps")
+    compare_command = commands.add_parser("compare", help="compare two saved run snapshots")
+    compare_command.add_argument("before", type=Path)
+    compare_command.add_argument("after", type=Path)
+    compare_command.add_argument("--json-report", type=Path, help="write comparison results as JSON")
+    compare_command.add_argument("--html-report", type=Path, help="write a standalone HTML report")
+    compare_command.add_argument(
+        "--fail-on-regression", action="store_true", help="exit 1 if a complete step regressed"
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "compare":
+            return compare(
+                args.before, args.after, json_report=args.json_report,
+                html_report=args.html_report, fail_on_regression=args.fail_on_regression,
+            )
         steps = DEFAULT_STEPS
         if args.config is not None:
             steps = load_steps(args.config)
-            if args.report.exists() and args.report.samefile(args.config):
-                raise ValueError("report path must differ from the config file")
-        return check(args.sample_sheet, args.output_dir, args.report, steps)
-    except (OSError, ValueError, csv.Error) as exc:
+        return check(
+            args.sample_sheet, args.output_dir, args.report, steps,
+            json_report=args.json_report, config=args.config,
+        )
+    except (OSError, ValueError, RuntimeError, csv.Error) as exc:
         print(f"seqrun-qc: {exc}", file=sys.stderr)
         return 2

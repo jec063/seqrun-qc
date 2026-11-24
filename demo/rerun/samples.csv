@@ -1,0 +1,4 @@
+sample_id,read1,read2
+recovers,../reads/R1.fastq,../reads/R2.fastq
+regresses,../reads/R1.fastq,../reads/R2.fastq
+unchanged,../reads/R1.fastq,../reads/R2.fastq
