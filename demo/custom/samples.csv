@@ -1,0 +1,2 @@
+sample_id,read1,read2
+example,../reads/R1.fastq,../reads/R2.fastq
