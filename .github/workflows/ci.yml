@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install .
+      - name: Run unittest suite
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test default and custom demos
+        shell: bash
+        run: |
+          demo_dir=$(mktemp -d)
+          trap 'rm -rf "$demo_dir"' EXIT
+
+          default_exit=0
+          seqrun-qc check demo/samples.csv demo/output --report "$demo_dir/default.csv" || default_exit=$?
+          if [ "$default_exit" -ne 1 ]; then
+            echo "Default demo exited $default_exit, expected 1" >&2
+            exit 1
+          fi
+          test -s "$demo_dir/default.csv"
+
+          config=demo/custom/steps.json
+          seqrun-qc check demo/custom/samples.csv demo/custom/output \
+            --config "$config" --report "$demo_dir/custom.csv"
+
+          python - "$config" "$demo_dir/custom.csv" <<'PYTHON'
+          import csv
+          import json
+          import sys
+
+          config_path, report_path = sys.argv[1:]
+          with open(config_path, encoding="utf-8") as config_file:
+              config = json.load(config_file)
+
+          expected = ["row", "sample_id", "read1", "read2", "issues"]
+          for step in config["steps"]:
+              name = step["name"]
+              expected.extend([f"{name}_status", f"{name}_evidence"])
+
+          with open(report_path, encoding="utf-8", newline="") as report_file:
+              report = csv.DictReader(report_file)
+              if report.fieldnames != expected:
+                  raise SystemExit(f"Expected CSV columns {expected}, got {report.fieldnames}")
+              if next(report, None) is None:
+                  raise SystemExit("Custom demo report has no sample rows")
+          PYTHON
