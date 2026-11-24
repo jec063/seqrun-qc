@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+from errno import ELOOP
 
 
 def file_identity(path):
@@ -17,8 +18,16 @@ def validate_destinations(destinations, inputs):
     protected_paths = set()
     protected_files = set()
     for path in inputs:
-        protected_paths.add(path.resolve())
-        identity = file_identity(path)
+        try:
+            protected_paths.add(path.resolve())
+            identity = file_identity(path)
+        except RuntimeError:
+            # Python 3.10–3.12 raise RuntimeError when resolving a symlink loop.
+            continue
+        except OSError as exc:
+            if exc.errno != ELOOP:
+                raise
+            continue
         if identity is not None:
             protected_files.add(identity)
 

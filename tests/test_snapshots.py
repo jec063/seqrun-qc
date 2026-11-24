@@ -69,3 +69,10 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(main([*self.args, "--json-report", str(destination)]), 2)
                 self.assertEqual(self.report.read_text(encoding="utf-8"), "original")
         self.assertFalse(expected_artifact.exists())
+
+    def test_symlink_loop_in_read_path_remains_a_row_issue(self):
+        self.read.unlink()
+        self.read.symlink_to(self.read)
+        with redirect_stdout(io.StringIO()) as terminal:
+            self.assertEqual(main([*self.args, "--json-report", str(self.snapshot)]), 1)
+        self.assertIn("missing read1 file: reads.fq", terminal.getvalue())
