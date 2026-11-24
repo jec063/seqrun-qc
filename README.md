@@ -2,6 +2,8 @@
 
 `seqrun-qc check` validates paired-end read paths and reports pipeline status from files already on disk. It checks file presence without reading FASTQ contents or running pipeline steps.
 
+[Rerun quick start](#rerun-quick-start) shows how to save two snapshots and create an offline HTML comparison.
+
 ## Install and run
 
 From the repository root, with Python 3.10 or later:
@@ -106,6 +108,8 @@ Run the tests after installation with `.venv/bin/python -m unittest discover -s 
 
 Pass `--json-report PATH` to `check` to save a snapshot alongside the CSV. Later, run `compare BEFORE.json AFTER.json` to compare the saved results even if the original files have moved. Reports require an existing parent directory. Output paths must be distinct from inputs and each other.
 
+### Rerun quick start
+
 Run this from the repository root after installing. Each check exits with code `1` because each snapshot has one incomplete step.
 
 ```sh
@@ -127,6 +131,12 @@ The embedded styles and saved evidence let you open the HTML report offline.
 | `recovers` | incomplete | complete | Its missing BAM index appears. |
 | `regresses` | complete | incomplete | Its BAM disappears. |
 | `unchanged` | complete | complete | Both expected outputs remain present. |
+
+To make a regression fail a script, add `--fail-on-regression`. This demo exits with code `1` when you run:
+
+```sh
+"$qc" compare "$reports/before.json" "$reports/after.json" --fail-on-regression
+```
 
 ### Snapshot JSON schema, version 1
 
