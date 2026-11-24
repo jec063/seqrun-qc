@@ -9,12 +9,12 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 
+from .comparison import compare
 from .reports import format_evidence, validate_destinations, write_json
+from .snapshots import SCHEMA_VERSION, STATUSES, reject_json_constant
 
 DONE_MARKER = "done.marker"
 FAILURE_RECORD = "failed.txt"
-SCHEMA_VERSION = 1
-STATUSES = ("complete", "failed", "incomplete", "pending")
 REQUIRED_COLUMNS = ("sample_id", "read1", "read2")
 PLACEHOLDER = re.compile(r"\{(sample_id|step)\}")
 
@@ -74,10 +74,6 @@ def validate_filenames(done, failed, outputs, label):
         if key in seen:
             raise ValueError(f"{label} has duplicate output filename {output!r}")
         seen.add(key)
-
-
-def reject_json_constant(value):
-    raise ValueError(f"invalid JSON constant {value}")
 
 
 def load_steps(config):
@@ -308,8 +304,21 @@ def main(argv=None):
     command.add_argument("--report", type=Path, default=Path("seqrun-qc-status.csv"))
     command.add_argument("--json-report", type=Path, help="write a JSON run snapshot")
     command.add_argument("--config", type=Path, help="JSON file defining pipeline steps")
+    compare_command = commands.add_parser("compare", help="compare two saved run snapshots")
+    compare_command.add_argument("before", type=Path)
+    compare_command.add_argument("after", type=Path)
+    compare_command.add_argument("--json-report", type=Path, help="write comparison results as JSON")
+    compare_command.add_argument("--html-report", type=Path, help="write a standalone HTML report")
+    compare_command.add_argument(
+        "--fail-on-regression", action="store_true", help="exit 1 if a complete step regressed"
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "compare":
+            return compare(
+                args.before, args.after, json_report=args.json_report,
+                html_report=args.html_report, fail_on_regression=args.fail_on_regression,
+            )
         steps = DEFAULT_STEPS
         if args.config is not None:
             steps = load_steps(args.config)
