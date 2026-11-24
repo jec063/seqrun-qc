@@ -101,3 +101,56 @@ The six rows use tiny synthetic FASTQ files and mock outputs included in the rep
 The terminal summary reports **6 rows checked, 2 needing correction** and **2 complete, 1 failed, 1 incomplete, 4 pending** steps.
 
 Run the tests after installation with `.venv/bin/python -m unittest discover -s tests -v`.
+
+## Save and compare run snapshots
+
+Pass `--json-report PATH` to `check` to save a snapshot alongside the CSV. Later, run `compare BEFORE.json AFTER.json` to compare the saved results even if the original files have moved. Reports require an existing parent directory. Output paths must be distinct from inputs and each other.
+
+Run this from the repository root after installing. Each check exits with code `1` because each snapshot has one incomplete step.
+
+```sh
+reports=$(mktemp -d)
+qc=.venv/bin/seqrun-qc
+"$qc" check demo/rerun/samples.csv demo/rerun/before --config demo/flat/steps.json \
+  --report "$reports/before.csv" --json-report "$reports/before.json" || test "$?" -eq 1
+"$qc" check demo/rerun/samples.csv demo/rerun/after --config demo/flat/steps.json \
+  --report "$reports/after.csv" --json-report "$reports/after.json" || test "$?" -eq 1
+"$qc" compare "$reports/before.json" "$reports/after.json" \
+  --json-report "$reports/comparison.json" --html-report "$reports/comparison.html"
+printf 'Open %s/comparison.html in your browser\n' "$reports"
+```
+
+The embedded styles and saved evidence let you open the HTML report offline.
+
+| Sample | Before | After | Explanation |
+| --- | --- | --- | --- |
+| `recovers` | incomplete | complete | Its missing BAM index appears. |
+| `regresses` | complete | incomplete | Its BAM disappears. |
+| `unchanged` | complete | complete | Both expected outputs remain present. |
+
+### Snapshot JSON schema, version 1
+
+The root is an object with these fields:
+
+| Field | Contents |
+| --- | --- |
+| `schema_version` | Integer `1`. |
+| `steps` | Ordered array of step definitions with `name`, `directory`, `done_marker`, `failed_marker`, and an ordered `outputs` array. Omitted config fields are stored with their defaults. |
+| `status_totals` | Object with integer counts for `complete`, `failed`, `incomplete`, and `pending`. |
+| `rows` | Array in sample-sheet order. Each row has its original starting line number (`row`), the three sample-sheet fields, an `issues` array, and a `steps` object keyed by step name. |
+
+A valid row has one result for each configured step. A result has a `status` string and an `evidence` object with a `directory` string and `present` and `absent` filename arrays. Invalid rows, including duplicate IDs, are kept with their validation messages and an empty `steps` object.
+
+### Comparison and exit codes
+
+Comparison matches valid rows by exact sample ID and steps by exact name. A sample that becomes invalid appears as removed from the valid sample set. A step with a changed definition appears separately from status transitions. Step list order has no effect on matching. In a step definition, its directory, marker templates, and ordered outputs are compared as stored. A regression moves from complete to any other status. A recovery moves from a non-complete status to complete.
+
+The comparison JSON also has `schema_version: 1`. It includes `validation` and `status_totals` for both sides, lists of added and removed samples and steps, `changed_definitions`, `transitions`, and summary `counts`. Its `samples` array carries per-step results with before and after evidence, using `null` when a result exists on only one side.
+
+| Command | Exit code | Meaning |
+| --- | --- | --- |
+| `check` | `0` | Every row validates and all checked steps are complete. |
+| `check` | `1` | Reports were written and at least one row or step needs attention. |
+| `compare` | `0` | Comparison succeeded. This is the default even if there are regressions. |
+| `compare --fail-on-regression` | `1` | Comparison succeeded and at least one step regressed under the same definition. Requested reports are still written. |
+| Either | `2` | Usage, validation, or I/O error, including an unsupported snapshot schema. |

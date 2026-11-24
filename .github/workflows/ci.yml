@@ -93,3 +93,46 @@ jobs:
           if "missing-index.filtered.bam.bai" not in absent:
               raise SystemExit(f"Flat demo evidence must list the missing BAM index: {evidence}")
           PYTHON
+      - name: Smoke-test snapshots and offline comparison
+        shell: bash
+        run: |
+          demo_dir=$(mktemp -d)
+          trap 'rm -rf "$demo_dir"' EXIT
+
+          for run in before after; do
+            cp -R "demo/rerun/$run" "$demo_dir/$run"
+            check_exit=0
+            seqrun-qc check demo/rerun/samples.csv "$demo_dir/$run" \
+              --config demo/flat/steps.json --report "$demo_dir/$run.csv" \
+              --json-report "$demo_dir/$run.json" || check_exit=$?
+            if [ "$check_exit" -ne 1 ]; then
+              echo "$run check exited $check_exit, expected 1" >&2
+              exit 1
+            fi
+            test -s "$demo_dir/$run.csv"
+            mv "$demo_dir/$run" "$demo_dir/$run-moved"
+          done
+
+          compare_exit=0
+          seqrun-qc compare "$demo_dir/before.json" "$demo_dir/after.json" \
+            --json-report "$demo_dir/comparison.json" --html-report "$demo_dir/comparison.html" \
+            --fail-on-regression || compare_exit=$?
+          if [ "$compare_exit" -ne 1 ]; then
+            echo "Comparison exited $compare_exit, expected 1" >&2
+            exit 1
+          fi
+
+          python - "$demo_dir" <<'PYTHON'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+          changes = {sample["sample_id"]: sample["steps"][0]["change"] for sample in result["samples"]}
+          assert changes == {"recovers": "recovery", "regresses": "regression", "unchanged": "unchanged"}, changes
+          assert result["counts"] == {"transitions": 2, "regressions": 1, "recoveries": 1}
+          html = (root / "comparison.html").read_text(encoding="utf-8")
+          for text in ("Run snapshot comparison", "recovers.filtered.bam.bai", "regresses.filtered.bam"):
+              assert text in html, text
+          PYTHON
