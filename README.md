@@ -22,7 +22,7 @@ The report has one record per input row in sheet order. The `row` column gives i
 
 ## Pipeline file conventions
 
-Place each step's files under `OUTPUT_DIR/SAMPLE_ID/STEP/`. The two steps are assessed independently.
+Place each step's files under `OUTPUT_DIR/SAMPLE_ID/STEP/`. Steps are assessed independently. By default the command checks these two steps in order.
 
 | Step | Expected output files |
 | --- | --- |
@@ -39,6 +39,31 @@ Each step uses `done.marker` for completion and `failed.txt` for an explicit fai
 | `pending` | Neither record nor any expected output is present. |
 
 Exit code `0` means every row validates and all checked steps are complete. Exit code `1` means the report was written and at least one row or step needs attention. Exit code `2` means a usage, input, or I/O error prevented a successful check.
+
+## Configure pipeline steps
+
+Pass `--config PATH` to replace the default steps with an ordered list from a UTF-8 JSON file.
+
+```json
+{
+  "steps": [
+    {"name": "align", "outputs": ["aligned.bam", "aligned.bam.bai"]},
+    {"name": "qc", "outputs": ["metrics.tsv"]}
+  ]
+}
+```
+
+The `steps` list and each step's `outputs` list must be nonempty. Step names must be unique regardless of case. Names and output filenames must each be a single safe path component. Avoid path separators, control characters, Windows-reserved characters and device names, and trailing dots or spaces. Output filenames cannot match `done.marker` or `failed.txt` regardless of case. Use the spelling and case of the files on disk.
+
+The same directory layout, markers, and status rules apply. The CSV adds a status and evidence column for each configured step in the order listed. An invalid config exits with code `2` without changing the report.
+
+After installing, run the custom demo from the repository root.
+
+```sh
+.venv/bin/seqrun-qc check demo/custom/samples.csv demo/custom/output --config demo/custom/steps.json --report /tmp/seqrun-qc-custom.csv
+```
+
+The one sample has two complete steps and exits with code `0`. The report lists `align_status`, `align_evidence`, `qc_status`, and `qc_evidence` in that order after the sample columns. The tiny alignment files are empty placeholders because the CLI checks file presence.
 
 ## Expected demo results
 

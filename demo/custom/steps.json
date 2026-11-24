@@ -1,0 +1,6 @@
+{
+  "steps": [
+    {"name": "align", "outputs": ["aligned.bam", "aligned.bam.bai"]},
+    {"name": "qc", "outputs": ["metrics.tsv"]}
+  ]
+}
